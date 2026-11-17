@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>顔魅力度評価システム</title>
+    <style>
+        body { font-family: sans-serif; text-align: center; background: #f4f4f9; margin-top: 50px; }
+        .container { background: white; padding: 20px; border-radius: 8px; display: inline-block; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }
+        video { width: 400px; height: 300px; background: #000; border-radius: 4px; }
+        button { padding: 10px 20px; font-size: 16px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; margin-top: 15px; }
+        button:hover { background: #0056b3; }
+        #result { margin-top: 20px; font-size: 18px; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>顔魅力度評価システム (セキュア判定)</h2>
+    <div>
+        <video id="webcam" autoplay playsinline></video>
+    </div>
+    <canvas id="snapshot" style="display:none;"></canvas>
+    <div>
+        <button id="capture-btn">顔を判定する</button>
+    </div>
+    <div id="result">判定結果がここに表示されます</div>
+</div>
+
+<script>
+const video = document.getElementById('webcam');
+const canvas = document.getElementById('snapshot');
+const captureBtn = document.getElementById('capture-btn');
+const resultDiv = document.getElementById('result');
+
+// 1. Webカメラの起動
+navigator.mediaDevices.getUserMedia({ video: true })
+    .then(stream => {
+        video.srcObject = stream;
+    })
+    .catch(err => {
+        alert("カメラの起動に失敗しました: " + err);
+    });
+
+// 2. 「判定する」ボタンを押したときの処理
+captureBtn.addEventListener('click', async () => {
+    resultDiv.innerText = "処理中...";
+    
+    const context = canvas.getContext('2d');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    
+    // CanvasからJPEGのデータURLを取得し、バイナリ(ArrayBuffer)に変換
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
+    const res = await fetch(dataUrl);
+    const imageBytes = await res.arrayBuffer();
+
+    try {
+        // 3. ブラウザ側でAES-GCM用のランダムな鍵と初期化ベクトル(nonce)を生成
+        const key = await window.crypto.subtle.generateKey(
+            { name: "AES-GCM", length: 256 },
+            true,
+            ["encrypt", "decrypt"]
+        );
+        const nonce = window.crypto.getRandomValues(new Uint8Array(12));
+
+        // 4. 画像データをAES-GCMで暗号化
+        const encryptedContent = await window.crypto.subtle.encrypt(
+            { name: "AES-GCM", iv: nonce },
+            key,
+            imageBytes
+        );
+
+        // ※ 本来はサーバー側の公開鍵等でAES鍵を安全に共有しますが、
+        // 今回の簡易テストではBase64化してサーバーへ送信します
+        const ciphertextB64 = btoa(String.fromCharCode(...new Uint8Array(encryptedContent)));
+        const nonceB64 = btoa(String.fromCharCode(...nonce));
+
+        // 5. FastAPIサーバーへ送信
+        const response = await fetch('http://localhost:8000/api/evaluate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                ciphertext: ciphertextB64,
+                nonce: nonceB64
+            })
+        });
+
+        const result = await response.json();
+        if (response.ok) {
+            resultDiv.innerText = `判定スコア: ${result.score} 点`;
+        } else {
+            resultDiv.innerText = `エラー: ${result.detail || '不明なエラー'}`;
+        }
+
+    } catch (e) {
+        resultDiv.innerText = `通信・暗号化エラー: ${e.message}`;
+    }
+});
+</script>
+
+</body>
+</html>
